@@ -14,6 +14,7 @@ SHOW_CWD=${SHOW_CWD:-1}
 SHOW_SESSION=${SHOW_SESSION:-0}
 SHOW_TOKENS=${SHOW_TOKENS:-0}
 SHOW_REMAINING=${SHOW_REMAINING:-0}
+SHOW_CURSOR_USAGE=${SHOW_CURSOR_USAGE:-0}
 SHOW_VIM=${SHOW_VIM:-1}
 SHOW_AUTORUN=${SHOW_AUTORUN:-1}
 SHOW_VERSION=${SHOW_VERSION:-0}
@@ -21,6 +22,8 @@ SHOW_OUTPUT_STYLE=${SHOW_OUTPUT_STYLE:-0}
 SHOW_GIT_AHEAD=${SHOW_GIT_AHEAD:-0}
 SHOW_CONTEXT_WARN=${SHOW_CONTEXT_WARN:-0}
 CONTEXT_WARN_AT=${CONTEXT_WARN_AT:-80}
+CURSOR_USAGE_TTL=${CURSOR_USAGE_TTL:-300}
+CURSOR_USAGE_TIMEOUT=${CURSOR_USAGE_TIMEOUT:-1.5}
 
 # Appearance.
 STATUSLINE_SEP=${STATUSLINE_SEP:-|}
@@ -61,6 +64,9 @@ if [ "$STATUSLINE_LANG" = "pt" ]; then
   L_INPUT="entrada"
   L_OUTPUT="saida"
   L_AUTORUN="auto"
+  L_CURSOR_USAGE="Uso"
+  L_USED="usado"
+  L_LEFT="sobrando"
   L_SESSION="sessao"
   L_VERSION="versao"
   L_STYLE="estilo"
@@ -72,6 +78,9 @@ else
   L_INPUT="input"
   L_OUTPUT="output"
   L_AUTORUN="auto"
+  L_CURSOR_USAGE="Usage"
+  L_USED="used"
+  L_LEFT="left"
   L_SESSION="session"
   L_VERSION="version"
   L_STYLE="style"
@@ -94,6 +103,7 @@ output_style=$(jq_get '.output_style.name // empty')
 autorun=$(jq_get '.autorun // false')
 vim_mode=$(jq_get '.vim.mode // empty')
 payload_worktree_name=$(jq_get '.worktree.name // empty')
+render_width_chars=$(jq_get '.render_width_chars // empty')
 
 used_pct=$(jq_get '.context_window.used_percentage // empty')
 remaining_pct=$(jq_get '.context_window.remaining_percentage // empty')
@@ -138,6 +148,68 @@ format_context_size() {
   printf '%s' "$(format_count "$n")"
 }
 
+format_cents() {
+  local cents="$1"
+  [ -z "$cents" ] || [ "$cents" = "null" ] && return
+
+  LC_ALL=C awk -v cents="$cents" 'BEGIN { printf "$%.2f", cents / 100 }'
+}
+
+file_mtime() {
+  local out
+  out=$(stat -f %m "$1" 2>/dev/null)
+  case "$out" in
+    ''|*[!0-9]*) out=$(stat -c %Y "$1" 2>/dev/null) ;;
+  esac
+  case "$out" in
+    ''|*[!0-9]*) return 1 ;;
+    *) printf '%s\n' "$out" ;;
+  esac
+}
+
+read_cursor_access_token() {
+  if [ -n "${CURSOR_ACCESS_TOKEN:-}" ]; then
+    printf '%s' "$CURSOR_ACCESS_TOKEN"
+    return
+  fi
+
+  if command -v security >/dev/null 2>&1; then
+    security find-generic-password -s "cursor-access-token" -a "cursor-user" -w 2>/dev/null
+  fi
+}
+
+get_cursor_usage_json() {
+  local cache_dir cache now age resp token
+  cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/agent-status-line"
+  cache="$cache_dir/cursor-usage.json"
+  now=$(date +%s)
+
+  if [ -f "$cache" ]; then
+    age=$((now - $(file_mtime "$cache" 2>/dev/null || echo 0)))
+    if [ "$age" -lt "$CURSOR_USAGE_TTL" ] 2>/dev/null; then
+      cat "$cache" 2>/dev/null
+      return
+    fi
+  fi
+
+  token=$(read_cursor_access_token)
+  [ -z "$token" ] && return
+
+  resp=$(curl -sS --max-time "$CURSOR_USAGE_TIMEOUT" \
+    -X POST "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -H "Connect-Protocol-Version: 1" \
+    --data '{}' 2>/dev/null) || return
+
+  printf '%s' "$resp" | jq -e '.planUsage | type == "object"' >/dev/null 2>&1 || return
+
+  (umask 077; mkdir -p "$cache_dir" 2>/dev/null)
+  chmod 700 "$cache_dir" 2>/dev/null
+  (umask 077; printf '%s' "$resp" > "$cache.tmp.$$" 2>/dev/null) && mv -f "$cache.tmp.$$" "$cache" 2>/dev/null
+  printf '%s' "$resp"
+}
+
 git_branch=""
 git_worktree=""
 git_ahead_behind=""
@@ -180,6 +252,7 @@ seg_cwd=""
 seg_session=""
 seg_tokens=""
 seg_remaining=""
+seg_cursor_usage=""
 seg_vim=""
 seg_autorun=""
 seg_version=""
@@ -246,6 +319,36 @@ if [ "$SHOW_REMAINING" != "0" ] && [ -n "$remaining_pct" ]; then
   seg_remaining="$L_REMAINING: $(color_pct "$remaining_pct")"
 fi
 
+if [ "$SHOW_CURSOR_USAGE" != "0" ]; then
+  cursor_usage_json=$(get_cursor_usage_json)
+  if [ -n "$cursor_usage_json" ]; then
+    usage_used=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.includedSpend // .planUsage.totalSpend // empty' 2>/dev/null)
+    usage_left=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.remaining // empty' 2>/dev/null)
+    usage_limit=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.limit // empty' 2>/dev/null)
+    usage_pct=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.apiPercentUsed // .planUsage.totalPercentUsed // empty' 2>/dev/null)
+
+    if [ -z "$usage_pct" ] && [ -n "$usage_used" ] && [ -n "$usage_limit" ] && [ "$usage_limit" != "0" ]; then
+      usage_pct=$(LC_ALL=C awk -v used="$usage_used" -v limit="$usage_limit" 'BEGIN { printf "%.1f", used * 100 / limit }')
+    fi
+
+    used_label=$(format_cents "$usage_used")
+    left_label=$(format_cents "$usage_left")
+
+    if [ -n "$used_label" ] || [ -n "$left_label" ]; then
+      seg_cursor_usage="$L_CURSOR_USAGE:"
+      if [ -n "$used_label" ]; then
+        seg_cursor_usage="$seg_cursor_usage $used_label $L_USED"
+      fi
+      if [ -n "$left_label" ]; then
+        seg_cursor_usage="$seg_cursor_usage${used_label:+,} $left_label $L_LEFT"
+      fi
+      if [ -n "$usage_pct" ]; then
+        seg_cursor_usage="$seg_cursor_usage ($(color_pct "$usage_pct"))"
+      fi
+    fi
+  fi
+fi
+
 if [ "$SHOW_VIM" != "0" ] && [ -n "$vim_mode" ]; then
   seg_vim=$(printf '\033[%sm%s\033[0m' "$C_DIM" "$vim_mode")
 fi
@@ -262,7 +365,7 @@ if [ "$SHOW_OUTPUT_STYLE" != "0" ] && [ -n "$output_style" ]; then
   seg_output_style=$(printf '\033[%sm%s: %s\033[0m' "$C_DIM" "$L_STYLE" "$output_style")
 fi
 
-default_order="model git context cwd session tokens remaining vim autorun version output_style"
+default_order="model git context cursor_usage cwd session tokens remaining vim autorun version output_style"
 order="${STATUSLINE_ORDER:-$default_order}"
 order="${order//,/ }"
 
@@ -276,6 +379,7 @@ for key in $order; do
     session) seg="$seg_session" ;;
     tokens) seg="$seg_tokens" ;;
     remaining) seg="$seg_remaining" ;;
+    cursor_usage) seg="$seg_cursor_usage" ;;
     vim) seg="$seg_vim" ;;
     autorun) seg="$seg_autorun" ;;
     version) seg="$seg_version" ;;
@@ -300,7 +404,9 @@ vislen() {
 
 width="$STATUSLINE_WIDTH"
 if [ -z "$width" ]; then
-  if [ "${COLUMNS:-0}" -gt 0 ] 2>/dev/null; then
+  if [ -n "$render_width_chars" ] && [ "$render_width_chars" -gt 0 ] 2>/dev/null; then
+    width="$render_width_chars"
+  elif [ "${COLUMNS:-0}" -gt 0 ] 2>/dev/null; then
     width="$COLUMNS"
   else
     width=$(tput cols 2>/dev/null || echo 0)

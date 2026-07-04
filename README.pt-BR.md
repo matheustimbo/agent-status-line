@@ -51,6 +51,13 @@ PADDING=1 UPDATE_INTERVAL_MS=500 TIMEOUT_MS=1500 \
   curl -fsSL https://raw.githubusercontent.com/matheustimbo/agent-status-line/main/install.sh | bash
 ```
 
+Ative o uso experimental do plano Cursor durante a instalação:
+
+```bash
+ENABLE_CURSOR_USAGE=1 \
+  curl -fsSL https://raw.githubusercontent.com/matheustimbo/agent-status-line/main/install.sh | bash
+```
+
 ## Instalação Manual
 
 1. Baixe o script:
@@ -67,7 +74,7 @@ PADDING=1 UPDATE_INTERVAL_MS=500 TIMEOUT_MS=1500 \
    {
      "statusLine": {
        "type": "command",
-       "command": "bash ~/.cursor/statusline-command.sh",
+       "command": "~/.cursor/statusline-command.sh",
        "padding": 2,
        "updateIntervalMs": 1000,
        "timeoutMs": 2000
@@ -85,7 +92,7 @@ Configure a status line com variáveis de ambiente no campo `command`:
 {
   "statusLine": {
     "type": "command",
-    "command": "STATUSLINE_LANG=pt SHOW_VERSION=1 bash ~/.cursor/statusline-command.sh",
+    "command": "bash -lc 'STATUSLINE_LANG=pt SHOW_VERSION=1 ~/.cursor/statusline-command.sh'",
     "padding": 2
   }
 }
@@ -117,6 +124,7 @@ Estas ficam escondidas por padrão. Defina qualquer variável como `1` para most
 | `SHOW_SESSION` | Nome da sessão |
 | `SHOW_TOKENS` | Tokens estimados de entrada/saída |
 | `SHOW_REMAINING` | Porcentagem restante de contexto |
+| `SHOW_CURSOR_USAGE` | Uso/gasto incluso experimental do Cursor via API interna do dashboard |
 | `SHOW_VERSION` | Versão do Agent CLI |
 | `SHOW_OUTPUT_STYLE` | Nome do estilo de saída |
 | `SHOW_GIT_AHEAD` | Ahead/behind contra upstream, como `↑2 ↓1` |
@@ -131,11 +139,13 @@ Estas ficam escondidas por padrão. Defina qualquer variável como `1` para most
 | `STATUSLINE_ORDER` | Ordem das seções, separada por vírgula |
 | `STATUSLINE_THEME` | `dark` por padrão ou `light` |
 | `STATUSLINE_WIDTH` | Força largura de quebra. Vazio detecta automaticamente; `0` desliga a quebra |
+| `CURSOR_USAGE_TTL` | TTL do cache em segundos para uso experimental do Cursor, padrão `300` |
+| `CURSOR_USAGE_TIMEOUT` | Timeout da busca em segundos para uso experimental do Cursor, padrão `1.5` |
 
 Chaves aceitas em `STATUSLINE_ORDER`:
 
 ```text
-model,git,context,cwd,session,tokens,remaining,vim,autorun,version,output_style
+model,git,context,cursor_usage,cwd,session,tokens,remaining,vim,autorun,version,output_style
 ```
 
 Exemplo:
@@ -144,7 +154,7 @@ Exemplo:
 {
   "statusLine": {
     "type": "command",
-    "command": "STATUSLINE_ORDER=model,context,git SHOW_TOKENS=1 bash ~/.cursor/statusline-command.sh"
+    "command": "bash -lc 'STATUSLINE_ORDER=model,context,git SHOW_TOKENS=1 ~/.cursor/statusline-command.sh'"
   }
 }
 ```
@@ -154,6 +164,27 @@ Exemplo:
 O Agent CLI inicia o comando configurado a cada atualização da status line e envia um payload JSON via stdin. O script lê campos como `model`, `workspace`, `context_window`, `vim`, `autorun`, `version` e `worktree`, depois imprime texto colorido com ANSI no stdout.
 
 Diferente da versão para Claude Code, este projeto não mostra rate limits de assinatura Claude nem custo da sessão porque esses campos não fazem parte do payload de status line do Agent CLI.
+
+### Uso Experimental Do Cursor
+
+Defina `SHOW_CURSOR_USAGE=1` para mostrar o uso incluso do plano Cursor:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash -lc 'SHOW_CURSOR_USAGE=1 ~/.cursor/statusline-command.sh'"
+  }
+}
+```
+
+No macOS, o script lê do Keychain o `cursor-access-token` do Agent CLI e chama o endpoint interno do dashboard do Cursor:
+
+```text
+POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage
+```
+
+O token fica apenas em memória e nunca é gravado em disco ou impresso. A resposta de uso é cacheada em `~/.cache/agent-status-line/cursor-usage.json` por `CURSOR_USAGE_TTL` segundos. As buscas respeitam `CURSOR_USAGE_TIMEOUT` para não travar a status line. Esse endpoint não é documentado e pode mudar sem aviso.
 
 ## Testes
 

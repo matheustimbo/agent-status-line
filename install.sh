@@ -9,6 +9,7 @@ RAW_URL="https://raw.githubusercontent.com/matheustimbo/agent-status-line/main/s
 PADDING="${PADDING:-2}"
 UPDATE_INTERVAL_MS="${UPDATE_INTERVAL_MS:-1000}"
 TIMEOUT_MS="${TIMEOUT_MS:-2000}"
+ENABLE_CURSOR_USAGE="${ENABLE_CURSOR_USAGE:-0}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "Error: jq is required." >&2
@@ -34,13 +35,19 @@ fi
 
 chmod +x "$SCRIPT_PATH"
 
+STATUSLINE_COMMAND="~/.cursor/statusline-command.sh"
+if [ "$ENABLE_CURSOR_USAGE" != "0" ]; then
+  STATUSLINE_COMMAND="bash -lc 'SHOW_CURSOR_USAGE=1 ~/.cursor/statusline-command.sh'"
+fi
+
 STATUSLINE_BLOCK=$(jq -n \
+  --arg command "$STATUSLINE_COMMAND" \
   --argjson padding "$PADDING" \
   --argjson updateIntervalMs "$UPDATE_INTERVAL_MS" \
   --argjson timeoutMs "$TIMEOUT_MS" \
   '{
     type: "command",
-    command: "bash ~/.cursor/statusline-command.sh",
+    command: $command,
     padding: $padding,
     updateIntervalMs: $updateIntervalMs,
     timeoutMs: $timeoutMs
