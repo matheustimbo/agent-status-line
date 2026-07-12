@@ -124,7 +124,7 @@ Estas ficam escondidas por padrão. Defina qualquer variável como `1` para most
 | `SHOW_SESSION` | Nome da sessão |
 | `SHOW_TOKENS` | Tokens estimados de entrada/saída |
 | `SHOW_REMAINING` | Porcentagem restante de contexto |
-| `SHOW_CURSOR_USAGE` | Uso/gasto incluso experimental do Cursor via API interna do dashboard |
+| `SHOW_CURSOR_USAGE` | Uso do plano Cursor: pools first-party (`auto`) vs API, `$usado/$limite` opcional, marcador de slow queue |
 | `SHOW_VERSION` | Versão do Agent CLI |
 | `SHOW_OUTPUT_STYLE` | Nome do estilo de saída |
 | `SHOW_GIT_AHEAD` | Ahead/behind contra upstream, como `↑2 ↓1` |
@@ -139,8 +139,11 @@ Estas ficam escondidas por padrão. Defina qualquer variável como `1` para most
 | `STATUSLINE_ORDER` | Ordem das seções, separada por vírgula |
 | `STATUSLINE_THEME` | `dark` por padrão ou `light` |
 | `STATUSLINE_WIDTH` | Força largura de quebra. Vazio detecta automaticamente; `0` desliga a quebra |
-| `CURSOR_USAGE_TTL` | TTL do cache em segundos para uso experimental do Cursor, padrão `300` |
-| `CURSOR_USAGE_TIMEOUT` | Timeout da busca em segundos para uso experimental do Cursor, padrão `1.5` |
+| `CURSOR_USAGE_TTL` | TTL do cache em segundos para uso do Cursor, padrão `300` |
+| `CURSOR_USAGE_TIMEOUT` | Timeout da busca em segundos para uso do Cursor, padrão `2.0` |
+| `CURSOR_USAGE_FORMAT` | `pools` (padrão) ou `legacy` |
+| `CURSOR_USAGE_SHOW_DOLLARS` | Mostra `$usado/$limite` no formato pools, padrão `1` |
+| `CURSOR_USAGE_SHOW_SLOW` | Mostra marcador de slow queue, padrão `1` |
 
 Chaves aceitas em `STATUSLINE_ORDER`:
 
@@ -167,7 +170,16 @@ Diferente da versão para Claude Code, este projeto não mostra rate limits de a
 
 ### Uso Experimental Do Cursor
 
-Defina `SHOW_CURSOR_USAGE=1` para mostrar o uso incluso do plano Cursor:
+Defina `SHOW_CURSOR_USAGE=1` para mostrar o uso do plano Cursor via API interna do dashboard:
+
+```text
+Uso: auto 50% · api 100% ($400.00/$400.00)
+```
+
+- `auto` = pool first-party (Auto, Composer, Grok)
+- `api` = pool frontier/API (Claude, GPT, … quando selecionados manualmente)
+- valores em dólar = gasto incluso vs limite incluso do ciclo
+- `lento` aparece em vermelho quando a conta cai na slow queue
 
 ```json
 {
@@ -178,13 +190,37 @@ Defina `SHOW_CURSOR_USAGE=1` para mostrar o uso incluso do plano Cursor:
 }
 ```
 
-No macOS, o script lê do Keychain o `cursor-access-token` do Agent CLI e chama o endpoint interno do dashboard do Cursor:
+No macOS, o script lê do Keychain o `cursor-access-token` do Agent CLI e chama em paralelo os endpoints internos do dashboard do Cursor:
 
 ```text
 POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage
+POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetUsageLimitPolicyStatus
 ```
 
-O token fica apenas em memória e nunca é gravado em disco ou impresso. A resposta de uso é cacheada em `~/.cache/agent-status-line/cursor-usage.json` por `CURSOR_USAGE_TTL` segundos. As buscas respeitam `CURSOR_USAGE_TIMEOUT` para não travar a status line. Esse endpoint não é documentado e pode mudar sem aviso.
+O token fica apenas em memória e nunca é gravado em disco ou impresso. A resposta mesclada é cacheada em `~/.cache/agent-status-line/cursor-usage.json` por `CURSOR_USAGE_TTL` segundos. As buscas respeitam `CURSOR_USAGE_TIMEOUT` para não travar a status line. Esses endpoints não são documentados e podem mudar sem aviso.
+
+Knobs opcionais de uso do Cursor:
+
+| Variável | Efeito |
+| --- | --- |
+| `CURSOR_USAGE_FORMAT` | `pools` (padrão) ou `legacy` (linha única de gasto) |
+| `CURSOR_USAGE_SHOW_DOLLARS` | Inclui `$usado/$limite` (padrão `1`) |
+| `CURSOR_USAGE_SHOW_SLOW` | Mostra marcador de slow queue (padrão `1`) |
+| `CURSOR_USAGE_JSON` | Injeta JSON para teste offline |
+
+Exemplo com o formato antigo de porcentagem única:
+
+```bash
+bash -lc 'SHOW_CURSOR_USAGE=1 CURSOR_USAGE_FORMAT=legacy ~/.cursor/statusline-command.sh'
+```
+
+Teste offline:
+
+```bash
+echo '{"model":{"display_name":"Grok 4.5"}}' \
+  | SHOW_CURSOR_USAGE=1 CURSOR_USAGE_JSON='{"planUsage":{"autoPercentUsed":50.1,"apiPercentUsed":100,"includedSpend":40000,"limit":40000},"policy":{"isInSlowPool":false}}' \
+    ./statusline-command.sh
+```
 
 ## Testes
 

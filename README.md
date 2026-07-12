@@ -124,7 +124,7 @@ These are hidden by default. Set any variable to `1` to show it.
 | `SHOW_SESSION` | Session name |
 | `SHOW_TOKENS` | Estimated input/output tokens |
 | `SHOW_REMAINING` | Context remaining percentage |
-| `SHOW_CURSOR_USAGE` | Experimental Cursor included usage/spend from Cursor's internal dashboard API |
+| `SHOW_CURSOR_USAGE` | Cursor plan usage: first-party (`auto`) vs API pools, optional `$used/$limit`, slow-queue marker |
 | `SHOW_VERSION` | Agent CLI version |
 | `SHOW_OUTPUT_STYLE` | Output style name |
 | `SHOW_GIT_AHEAD` | Ahead/behind vs upstream, like `↑2 ↓1` |
@@ -139,8 +139,11 @@ These are hidden by default. Set any variable to `1` to show it.
 | `STATUSLINE_ORDER` | Comma-separated section order |
 | `STATUSLINE_THEME` | `dark` default or `light` |
 | `STATUSLINE_WIDTH` | Force wrapping width. Empty means auto-detect; `0` disables wrapping |
-| `CURSOR_USAGE_TTL` | Cache TTL in seconds for experimental Cursor usage, default `300` |
-| `CURSOR_USAGE_TIMEOUT` | Fetch timeout in seconds for experimental Cursor usage, default `1.5` |
+| `CURSOR_USAGE_TTL` | Cache TTL in seconds for Cursor usage, default `300` |
+| `CURSOR_USAGE_TIMEOUT` | Fetch timeout in seconds for Cursor usage, default `2.0` |
+| `CURSOR_USAGE_FORMAT` | `pools` (default) or `legacy` |
+| `CURSOR_USAGE_SHOW_DOLLARS` | Show `$used/$limit` with pools format, default `1` |
+| `CURSOR_USAGE_SHOW_SLOW` | Show slow-queue marker, default `1` |
 
 Supported section keys for `STATUSLINE_ORDER`:
 
@@ -167,7 +170,16 @@ Unlike the Claude Code version, this project does not show Claude subscription r
 
 ### Experimental Cursor Usage
 
-Set `SHOW_CURSOR_USAGE=1` to show included Cursor plan usage:
+Set `SHOW_CURSOR_USAGE=1` to show Cursor plan usage from the internal dashboard API:
+
+```text
+Usage: auto 50% · api 100% ($400.00/$400.00)
+```
+
+- `auto` = first-party pool (Auto, Composer, Grok)
+- `api` = frontier/API pool (Claude, GPT, … when selected manually)
+- dollar amounts = included spend vs included limit for the billing cycle
+- `slow` appears in red when Cursor puts the account in the slow queue
 
 ```json
 {
@@ -178,13 +190,37 @@ Set `SHOW_CURSOR_USAGE=1` to show included Cursor plan usage:
 }
 ```
 
-On macOS, the script reads the Agent CLI `cursor-access-token` from Keychain and calls Cursor's internal dashboard endpoint:
+On macOS, the script reads the Agent CLI `cursor-access-token` from Keychain and calls Cursor's internal dashboard endpoints in parallel:
 
 ```text
 POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage
+POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetUsageLimitPolicyStatus
 ```
 
-The token is kept in memory and never written to disk or printed. The usage response is cached under `~/.cache/agent-status-line/cursor-usage.json` for `CURSOR_USAGE_TTL` seconds. Fetches are capped by `CURSOR_USAGE_TIMEOUT` so the status line does not hang. This endpoint is undocumented and can change without notice.
+The token is kept in memory and never written to disk or printed. The merged usage response is cached under `~/.cache/agent-status-line/cursor-usage.json` for `CURSOR_USAGE_TTL` seconds. Fetches are capped by `CURSOR_USAGE_TIMEOUT` so the status line does not hang. These endpoints are undocumented and can change without notice.
+
+Optional Cursor usage knobs:
+
+| Variable | Effect |
+| --- | --- |
+| `CURSOR_USAGE_FORMAT` | `pools` (default) or `legacy` single-line spend view |
+| `CURSOR_USAGE_SHOW_DOLLARS` | Include `$used/$limit` (default `1`) |
+| `CURSOR_USAGE_SHOW_SLOW` | Show slow-queue marker (default `1`) |
+| `CURSOR_USAGE_JSON` | Inject a JSON payload for offline testing |
+
+Example with the older single-percentage format:
+
+```bash
+bash -lc 'SHOW_CURSOR_USAGE=1 CURSOR_USAGE_FORMAT=legacy ~/.cursor/statusline-command.sh'
+```
+
+Offline test:
+
+```bash
+echo '{"model":{"display_name":"Grok 4.5"}}' \
+  | SHOW_CURSOR_USAGE=1 CURSOR_USAGE_JSON='{"planUsage":{"autoPercentUsed":50.1,"apiPercentUsed":100,"includedSpend":40000,"limit":40000},"policy":{"isInSlowPool":false}}' \
+    ./statusline-command.sh
+```
 
 ## Testing
 

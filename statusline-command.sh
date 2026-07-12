@@ -23,7 +23,12 @@ SHOW_GIT_AHEAD=${SHOW_GIT_AHEAD:-0}
 SHOW_CONTEXT_WARN=${SHOW_CONTEXT_WARN:-0}
 CONTEXT_WARN_AT=${CONTEXT_WARN_AT:-80}
 CURSOR_USAGE_TTL=${CURSOR_USAGE_TTL:-300}
-CURSOR_USAGE_TIMEOUT=${CURSOR_USAGE_TIMEOUT:-1.5}
+CURSOR_USAGE_TIMEOUT=${CURSOR_USAGE_TIMEOUT:-2.0}
+# pools = Auto/Composer/Grok + API percentages (default)
+# legacy = single spend/remaining line from earlier versions
+CURSOR_USAGE_FORMAT=${CURSOR_USAGE_FORMAT:-pools}
+CURSOR_USAGE_SHOW_DOLLARS=${CURSOR_USAGE_SHOW_DOLLARS:-1}
+CURSOR_USAGE_SHOW_SLOW=${CURSOR_USAGE_SHOW_SLOW:-1}
 
 # Appearance.
 STATUSLINE_SEP=${STATUSLINE_SEP:-|}
@@ -67,6 +72,9 @@ if [ "$STATUSLINE_LANG" = "pt" ]; then
   L_CURSOR_USAGE="Uso"
   L_USED="usado"
   L_LEFT="sobrando"
+  L_AUTO_POOL="auto"
+  L_API_POOL="api"
+  L_SLOW="lento"
   L_SESSION="sessao"
   L_VERSION="versao"
   L_STYLE="estilo"
@@ -81,6 +89,9 @@ else
   L_CURSOR_USAGE="Usage"
   L_USED="used"
   L_LEFT="left"
+  L_AUTO_POOL="auto"
+  L_API_POOL="api"
+  L_SLOW="slow"
   L_SESSION="session"
   L_VERSION="version"
   L_STYLE="style"
@@ -179,10 +190,15 @@ read_cursor_access_token() {
 }
 
 get_cursor_usage_json() {
-  local cache_dir cache now age resp token
+  local cache_dir cache now age resp token usage_tmp policy_tmp usage_resp policy_resp
   cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/agent-status-line"
   cache="$cache_dir/cursor-usage.json"
   now=$(date +%s)
+
+  if [ -n "${CURSOR_USAGE_JSON:-}" ]; then
+    printf '%s' "$CURSOR_USAGE_JSON"
+    return
+  fi
 
   if [ -f "$cache" ]; then
     age=$((now - $(file_mtime "$cache" 2>/dev/null || echo 0)))
@@ -195,19 +211,132 @@ get_cursor_usage_json() {
   token=$(read_cursor_access_token)
   [ -z "$token" ] && return
 
-  resp=$(curl -sS --max-time "$CURSOR_USAGE_TIMEOUT" \
+  usage_tmp=$(mktemp 2>/dev/null) || return
+  policy_tmp=$(mktemp 2>/dev/null) || {
+    rm -f "$usage_tmp"
+    return
+  }
+
+  curl -sS --max-time "$CURSOR_USAGE_TIMEOUT" \
     -X POST "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage" \
     -H "Authorization: Bearer $token" \
     -H "Content-Type: application/json" \
     -H "Connect-Protocol-Version: 1" \
-    --data '{}' 2>/dev/null) || return
+    --data '{}' >"$usage_tmp" 2>/dev/null &
+  curl -sS --max-time "$CURSOR_USAGE_TIMEOUT" \
+    -X POST "https://api2.cursor.sh/aiserver.v1.DashboardService/GetUsageLimitPolicyStatus" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -H "Connect-Protocol-Version: 1" \
+    --data '{}' >"$policy_tmp" 2>/dev/null &
+  wait
 
-  printf '%s' "$resp" | jq -e '.planUsage | type == "object"' >/dev/null 2>&1 || return
+  if ! jq -e '.planUsage | type == "object"' "$usage_tmp" >/dev/null 2>&1; then
+    rm -f "$usage_tmp" "$policy_tmp"
+    return
+  fi
+
+  if jq -e 'type == "object"' "$policy_tmp" >/dev/null 2>&1; then
+    resp=$(jq -n \
+      --slurpfile usage "$usage_tmp" \
+      --slurpfile policy "$policy_tmp" \
+      '
+        ($usage[0] // {}) as $u
+        | ($policy[0] // {}) as $p
+        | $u + {
+            policy: {
+              isInSlowPool: ($p.isInSlowPool // false),
+              allowedModelIds: ($p.allowedModelIds // []),
+              errorDetail: ($p.errorDetail // null),
+              slownessMs: ($p.slownessMs // null)
+            }
+          }
+      ' 2>/dev/null) || resp=$(cat "$usage_tmp")
+  else
+    resp=$(cat "$usage_tmp")
+  fi
+  rm -f "$usage_tmp" "$policy_tmp"
 
   (umask 077; mkdir -p "$cache_dir" 2>/dev/null)
   chmod 700 "$cache_dir" 2>/dev/null
   (umask 077; printf '%s' "$resp" > "$cache.tmp.$$" 2>/dev/null) && mv -f "$cache.tmp.$$" "$cache" 2>/dev/null
   printf '%s' "$resp"
+}
+
+format_cursor_usage_segment() {
+  local cursor_usage_json="$1"
+  local auto_pct api_pct total_pct usage_used usage_left usage_limit
+  local used_label left_label limit_label is_slow parts_text
+
+  auto_pct=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.autoPercentUsed // empty' 2>/dev/null)
+  api_pct=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.apiPercentUsed // empty' 2>/dev/null)
+  total_pct=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.totalPercentUsed // empty' 2>/dev/null)
+  usage_used=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.includedSpend // .planUsage.totalSpend // empty' 2>/dev/null)
+  usage_left=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.remaining // empty' 2>/dev/null)
+  usage_limit=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.limit // empty' 2>/dev/null)
+  is_slow=$(printf '%s' "$cursor_usage_json" | jq -r '.policy.isInSlowPool // false' 2>/dev/null)
+
+  if [ "$CURSOR_USAGE_FORMAT" = "legacy" ]; then
+    local usage_pct="$api_pct"
+    [ -z "$usage_pct" ] && usage_pct="$total_pct"
+    if [ -z "$usage_pct" ] && [ -n "$usage_used" ] && [ -n "$usage_limit" ] && [ "$usage_limit" != "0" ]; then
+      usage_pct=$(LC_ALL=C awk -v used="$usage_used" -v limit="$usage_limit" 'BEGIN { printf "%.1f", used * 100 / limit }')
+    fi
+
+    used_label=$(format_cents "$usage_used")
+    left_label=$(format_cents "$usage_left")
+
+    if [ -z "$used_label" ] && [ -z "$left_label" ] && [ -z "$usage_pct" ]; then
+      return
+    fi
+
+    parts_text="$L_CURSOR_USAGE:"
+    if [ -n "$used_label" ]; then
+      parts_text="$parts_text $used_label $L_USED"
+    fi
+    if [ -n "$left_label" ]; then
+      parts_text="$parts_text${used_label:+,} $left_label $L_LEFT"
+    fi
+    if [ -n "$usage_pct" ]; then
+      parts_text="$parts_text ($(color_pct "$usage_pct"))"
+    fi
+    printf '%s' "$parts_text"
+    return
+  fi
+
+  # Default: separate first-party (Auto/Composer/Grok) and API pools.
+  if [ -z "$auto_pct" ] && [ -z "$api_pct" ] && [ -z "$total_pct" ]; then
+    return
+  fi
+
+  parts_text="$L_CURSOR_USAGE:"
+  if [ -n "$auto_pct" ]; then
+    parts_text="$parts_text $L_AUTO_POOL $(color_pct "$auto_pct")"
+  fi
+  if [ -n "$api_pct" ]; then
+    parts_text="$parts_text${auto_pct:+ ·} $L_API_POOL $(color_pct "$api_pct")"
+  elif [ -n "$total_pct" ] && [ -z "$auto_pct" ]; then
+    parts_text="$parts_text $(color_pct "$total_pct")"
+  fi
+
+  if [ "$CURSOR_USAGE_SHOW_DOLLARS" != "0" ]; then
+    used_label=$(format_cents "$usage_used")
+    limit_label=$(format_cents "$usage_limit")
+    left_label=$(format_cents "$usage_left")
+    if [ -n "$used_label" ] && [ -n "$limit_label" ]; then
+      parts_text="$parts_text ($used_label/$limit_label)"
+    elif [ -n "$left_label" ]; then
+      parts_text="$parts_text ($left_label $L_LEFT)"
+    elif [ -n "$used_label" ]; then
+      parts_text="$parts_text ($used_label $L_USED)"
+    fi
+  fi
+
+  if [ "$CURSOR_USAGE_SHOW_SLOW" != "0" ] && [ "$is_slow" = "true" ]; then
+    parts_text="$parts_text $(printf '\033[31m%s\033[0m' "$L_SLOW")"
+  fi
+
+  printf '%s' "$parts_text"
 }
 
 git_branch=""
@@ -322,30 +451,7 @@ fi
 if [ "$SHOW_CURSOR_USAGE" != "0" ]; then
   cursor_usage_json=$(get_cursor_usage_json)
   if [ -n "$cursor_usage_json" ]; then
-    usage_used=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.includedSpend // .planUsage.totalSpend // empty' 2>/dev/null)
-    usage_left=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.remaining // empty' 2>/dev/null)
-    usage_limit=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.limit // empty' 2>/dev/null)
-    usage_pct=$(printf '%s' "$cursor_usage_json" | jq -r '.planUsage.apiPercentUsed // .planUsage.totalPercentUsed // empty' 2>/dev/null)
-
-    if [ -z "$usage_pct" ] && [ -n "$usage_used" ] && [ -n "$usage_limit" ] && [ "$usage_limit" != "0" ]; then
-      usage_pct=$(LC_ALL=C awk -v used="$usage_used" -v limit="$usage_limit" 'BEGIN { printf "%.1f", used * 100 / limit }')
-    fi
-
-    used_label=$(format_cents "$usage_used")
-    left_label=$(format_cents "$usage_left")
-
-    if [ -n "$used_label" ] || [ -n "$left_label" ]; then
-      seg_cursor_usage="$L_CURSOR_USAGE:"
-      if [ -n "$used_label" ]; then
-        seg_cursor_usage="$seg_cursor_usage $used_label $L_USED"
-      fi
-      if [ -n "$left_label" ]; then
-        seg_cursor_usage="$seg_cursor_usage${used_label:+,} $left_label $L_LEFT"
-      fi
-      if [ -n "$usage_pct" ]; then
-        seg_cursor_usage="$seg_cursor_usage ($(color_pct "$usage_pct"))"
-      fi
-    fi
+    seg_cursor_usage=$(format_cursor_usage_segment "$cursor_usage_json")
   fi
 fi
 
