@@ -173,7 +173,7 @@ Unlike the Claude Code version, this project does not show Claude subscription r
 Set `SHOW_CURSOR_USAGE=1` to show Cursor plan usage from the internal dashboard API:
 
 ```text
-Usage: auto 50% · api 100% ($400.00/$400.00)
+Usage: auto 50.07% · api 100.00% ($400.00/$400.00)
 ```
 
 - `auto` = first-party pool (Auto, Composer, Grok)

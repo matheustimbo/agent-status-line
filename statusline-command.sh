@@ -124,15 +124,21 @@ context_size=$(jq_get '.context_window.context_window_size // empty')
 
 color_pct() {
   local raw="$1"
-  local val
-  val=$(LC_ALL=C awk -v n="$raw" 'BEGIN { if (n == "") exit 1; printf "%.0f", n }') || return
+  local decimals="${2:-0}"
+  local shown bucket
+  shown=$(LC_ALL=C awk -v n="$raw" -v d="$decimals" 'BEGIN {
+    if (n == "") exit 1
+    fmt = "%." d "f"
+    printf fmt, n
+  }') || return
+  bucket=$(LC_ALL=C awk -v n="$raw" 'BEGIN { printf "%.0f", n }') || return
 
-  if [ "$val" -ge 80 ]; then
-    printf '\033[31m%s%%\033[0m' "$val"
-  elif [ "$val" -ge 50 ]; then
-    printf '\033[33m%s%%\033[0m' "$val"
+  if [ "$bucket" -ge 80 ]; then
+    printf '\033[31m%s%%\033[0m' "$shown"
+  elif [ "$bucket" -ge 50 ]; then
+    printf '\033[33m%s%%\033[0m' "$shown"
   else
-    printf '\033[32m%s%%\033[0m' "$val"
+    printf '\033[32m%s%%\033[0m' "$shown"
   fi
 }
 
@@ -298,7 +304,7 @@ format_cursor_usage_segment() {
       parts_text="$parts_text${used_label:+,} $left_label $L_LEFT"
     fi
     if [ -n "$usage_pct" ]; then
-      parts_text="$parts_text ($(color_pct "$usage_pct"))"
+      parts_text="$parts_text ($(color_pct "$usage_pct" 2))"
     fi
     printf '%s' "$parts_text"
     return
@@ -311,12 +317,12 @@ format_cursor_usage_segment() {
 
   parts_text="$L_CURSOR_USAGE:"
   if [ -n "$auto_pct" ]; then
-    parts_text="$parts_text $L_AUTO_POOL $(color_pct "$auto_pct")"
+    parts_text="$parts_text $L_AUTO_POOL $(color_pct "$auto_pct" 2)"
   fi
   if [ -n "$api_pct" ]; then
-    parts_text="$parts_text${auto_pct:+ ·} $L_API_POOL $(color_pct "$api_pct")"
+    parts_text="$parts_text${auto_pct:+ ·} $L_API_POOL $(color_pct "$api_pct" 2)"
   elif [ -n "$total_pct" ] && [ -z "$auto_pct" ]; then
-    parts_text="$parts_text $(color_pct "$total_pct")"
+    parts_text="$parts_text $(color_pct "$total_pct" 2)"
   fi
 
   if [ "$CURSOR_USAGE_SHOW_DOLLARS" != "0" ]; then

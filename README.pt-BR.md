@@ -173,7 +173,7 @@ Diferente da versão para Claude Code, este projeto não mostra rate limits de a
 Defina `SHOW_CURSOR_USAGE=1` para mostrar o uso do plano Cursor via API interna do dashboard:
 
 ```text
-Uso: auto 50% · api 100% ($400.00/$400.00)
+Uso: auto 50.07% · api 100.00% ($400.00/$400.00)
 ```
 
 - `auto` = pool first-party (Auto, Composer, Grok)
